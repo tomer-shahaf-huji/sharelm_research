@@ -1,78 +1,70 @@
 import os
-import datasets
-import pandas as pd
+import polars as pl
 import torch
 from sentence_transformers import SentenceTransformer
 import time
 
 # --- Configuration ---
 MODEL_NAME = "intfloat/e5-base-v2"
-DATASET_PATH = "ours_dataset_medium_conversations.pqt"
+CACHE_ROOT = "/cs/labs/oabend/tomer.shahaf/hf_cache_root"
+RESEARCH_DF_TMP_PARQUET_PATH = os.path.join(CACHE_ROOT, "df_sampled_100k_tmp.pqt")
+OUTPUT_PATH = os.path.join(CACHE_ROOT, "df_sampled_100k_tmp_with_cosines.pqt")
 
-# 1. High Map Batch: Reduce Python loop overhead
-MAP_BATCH_SIZE = 100  
-
-# 2. Strict Encoder Batch: Maximize GPU without OOM
+# ONLY ONE BATCH SIZE NEEDED (For GPU VRAM)
 ENCODER_BATCH_SIZE = 64 
-
-# E5-small/base supports up to 512 tokens
 MAX_SEQ_LENGTH = 512 
 
 def load_model(model_name):
     t0 = time.time()
-    print("loading model")
+    print("Loading model...")
     model = SentenceTransformer(model_name)
     model.max_seq_length = MAX_SEQ_LENGTH
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model.to(device)
-    model.half() # FP16 for speed/memory
-    print(f"Model loaded on {device} with max_seq_length={model.max_seq_length} in {time.time()-t0} seconds")
+    model.half() # FP16
+    print(f"Model loaded on {device} in {time.time()-t0:.2f}s")
     return model
 
-def load_dataset(dataset_path):
-    t0 = time.time()
-    df = pd.read_parquet(dataset_path)
-    dataset = datasets.Dataset.from_pandas(df)
-    #vdataset = datasets.load_dataset("parquet", data_files=dataset_path, split="train")
-    print(f"Loaded dataset with shape: {dataset.shape} in {time.time()-t0} seconds")
-    return dataset
-
-def _get_embeddings_and_cosines(text_rows, prefix):
+def _get_embeddings_and_cosines(text_rows, model, prefix):
     """
-    Helper function to process a list of rows, encode them with a specific prefix,
-    and calculate cosine similarity to the first item in each row.
+    Encodes ALL rows in one go. SentenceTransformer handles the batching.
     """
     flat_texts = []
     row_lengths = []
     
-    # 1. Flatten and Pre-process
+    # 1. Flatten all rows (Fast in Python for 100k items)
     for row in text_rows:
         if row is None:
             row = []
-            
-        # Apply the specific prefix (query vs passage)
         processed_row = [f"{prefix}{p}" for p in row]
         flat_texts.extend(processed_row)
         row_lengths.append(len(processed_row))
     
-    # 2. Encode
+    if not flat_texts:
+        return [[] for _ in row_lengths]
+
+    print(f"Encoding {len(flat_texts)} sentences with prefix '{prefix}'...")
+    
+    # 2. Encode Everything
+    # The library handles queueing batches to the GPU automatically
     all_embeddings = model.encode(
         flat_texts, 
         batch_size=ENCODER_BATCH_SIZE, 
         normalize_embeddings=True, 
         convert_to_tensor=True,
-        show_progress_bar=False 
+        show_progress_bar=True 
     )
     
-    # 3. Reconstruct and Calculate
+    # 3. Reconstruct
+    # Slicing the large tensor back into rows
     similarity_scores = []
     current_idx = 0
     
     for length in row_lengths:
-        row_embeddings = all_embeddings[current_idx : current_idx + length]
-        
         if length > 0:
+            row_embeddings = all_embeddings[current_idx : current_idx + length]
             anchor_vector = row_embeddings[0]
+            # Dot product (cosine similarity)
             scores = torch.matmul(row_embeddings, anchor_vector)
             similarity_scores.append(scores.tolist())
         else:
@@ -82,40 +74,37 @@ def _get_embeddings_and_cosines(text_rows, prefix):
         
     return similarity_scores
 
-def extract_semantic_vectors_cosines_batch(batch):
-    # Process User Prompts -> Use "query: "
+def process_dataset_full(dataset_path, model):
+    t0 = time.time()
+    
+    # Load entire file
+    df = pl.read_parquet(dataset_path)
+    print(f"Loaded {df.shape[0]} rows. Starting processing...")
+
+    # Process User Prompts
     user_cosines = _get_embeddings_and_cosines(
-        batch["user_prompts"], 
+        df["user_prompts"].to_list(), 
+        model=model,
         prefix="query: "
     )
     
-    # Process Model Answers -> Use "passage: "
+    # Process Model Answers
     model_cosines = _get_embeddings_and_cosines(
-        batch["model_answers"], 
+        df["model_answers"].to_list(), 
+        model=model,
         prefix="passage: "
     )
     
-    return {
-        "user_prompts_similarity": user_cosines,
-        "model_answers_similarity": model_cosines
-    }
-
-def process_dataset(dataset):
-    t0 = time.time()
-    print(f"Starting map with Map Batch: {MAP_BATCH_SIZE} | Encoder Batch: {ENCODER_BATCH_SIZE}")
-    updated_dataset = dataset.map(
-        extract_semantic_vectors_cosines_batch,
-        batched=True,
-        batch_size=MAP_BATCH_SIZE, 
-        desc="Extracting cosines for prompts and answers" 
-    )
+    # Save
+    updated_df = df.with_columns([
+        pl.Series("user_prompts_similarity", user_cosines),
+        pl.Series("model_answers_similarity", model_cosines)
+    ])
     
-    output_filename = "ours_dataset_medium_conversations_with_cosines.pqt"
-    updated_dataset.to_parquet(output_filename)
-    print(f"Saved to {output_filename} in {time.time()-t0} seconds")
-
+    updated_df.write_parquet(OUTPUT_PATH)
+    print(f"Done! Saved to {OUTPUT_PATH} in {time.time()-t0:.2f}s")
 
 if __name__ == "__main__":
+    os.makedirs(CACHE_ROOT, exist_ok=True)
     model = load_model(MODEL_NAME)
-    ds = load_dataset(DATASET_PATH)
-    process_dataset(ds)
+    process_dataset_full(RESEARCH_DF_TMP_PARQUET_PATH, model)
