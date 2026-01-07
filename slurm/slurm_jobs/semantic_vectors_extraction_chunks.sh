@@ -3,7 +3,7 @@
 # SLURM Directives (Resource Requests)
 
 # --- Job Identification & Resources ---
-#SBATCH --job-name=SemanticVectorsExtraction
+#SBATCH --job-name=SemanticVectorsExtractionChunks
 #SBATCH --partition=interactive   # Use a known available partition
 #SBATCH --mem=16G                 # Use a safe amount of RAM
 #SBATCH --cpus-per-task=4         # Use multiple cores for Dataset I/O
@@ -27,5 +27,5 @@ conda activate sharelm_research_env
 
 # 3. Run the PyTorch script
 echo "Starting PyTorch GPU job on $(hostname) with $CUDA_VISIBLE_DEVICES..."
-python -u slurm_jobs/extract_semantic_vectors.py
+python -u slurm_jobs/extract_semantic_vectors_chunks.py
 echo "SLURM script finished."
