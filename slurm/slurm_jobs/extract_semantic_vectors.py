@@ -7,8 +7,8 @@ import time
 # --- Configuration ---
 MODEL_NAME = "intfloat/e5-base-v2"
 CACHE_ROOT = "/cs/labs/oabend/tomer.shahaf/hf_cache_root"
-RESEARCH_DF_TMP_PARQUET_PATH = os.path.join(CACHE_ROOT, "df_sampled_100k_tmp.pqt")
-OUTPUT_PATH = os.path.join(CACHE_ROOT, "df_sampled_100k_tmp_with_cosines.pqt")
+RESEARCH_DF_TMP_PARQUET_PATH = os.path.join(CACHE_ROOT, "ours_dataset_medium_conversations.pqt")
+OUTPUT_PATH = os.path.join(CACHE_ROOT, "ours_dataset_medium_conversations_with_cosines.pqt")
 
 # ONLY ONE BATCH SIZE NEEDED (For GPU VRAM)
 ENCODER_BATCH_SIZE = 64 
