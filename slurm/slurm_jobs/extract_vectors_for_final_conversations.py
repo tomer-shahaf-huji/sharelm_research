@@ -3,20 +3,15 @@ import time
 import polars as pl
 import torch
 from sentence_transformers import SentenceTransformer
-import pickle
 
 
-
-import os
 import psutil
 
 def log_mem(msg):
     rss = psutil.Process(os.getpid()).memory_info().rss / 1e9
     print(f"[MEM] {msg}: {rss:.2f} GB", flush=True)
 
-
-
-ENCODER_BATCH_SIZE = 64
+ENCODER_BATCH_SIZE = 256
 MAX_SEQ_LENGTH = 512
 
 
@@ -73,33 +68,53 @@ def extract_and_save_embeddings(text_rows, model, prefix):
     )
     
     # 3. Reconstruct
-    # Slicing the large tensor back into rows
-    first_similarity_scores = []
-    sequential_similarity_scores = []
+    log_mem("before reconstruction")
+    # Move to CPU and numpy
+    all_embeddings_np = all_embeddings.cpu().to(torch.float32).numpy()
+    
+    embeddings_list = []
     current_idx = 0
     
-    all_embeddings_by_row = []
-    for idx, length in enumerate(row_lengths):
+    # Reconstruct rows
+    for i, length in enumerate(row_lengths):
         if length > 0:
-            row_embeddings = all_embeddings[current_idx : current_idx + length]
-            all_embeddings_by_row.append(row_embeddings)
+            # formatting: each row is a list of embeddings (which are lists of floats)
+            row_emb = all_embeddings_np[current_idx : current_idx + length].tolist()
+            embeddings_list.append(row_emb)
             current_idx += length
+        else:
+            embeddings_list.append([])
             
-        if idx % 1_000 == 0:
-          log_mem(f"after idx {idx}")
-            
+        if i % 10_000 == 0 and i > 0:
+            log_mem(f"processed {i} rows")
+
+    log_mem("after reconstruction")
     
-    log_mem("before pickle")
-    
-    p = os.path.join(CACHE_ROOT, prefix + "all_embeddings.pqt")
-    with open(p, 'wb') as f:
-        pickle.dump(all_embeddings_by_row, f) 
+    # 4. Save as Parquet
+    df = pl.DataFrame({"embeddings": embeddings_list})
+    save_embeddings_to_parquet(df, prefix)
         
-    log_mem("after pickle")
+    log_mem("after save")
 
-    # return all_embeddings_by_row
-           
 
+def save_embeddings_to_parquet(df, prefix):
+    # Sanitize prefix for filename
+    # Why safe_prefix is needed:
+    # 1. 'query: ' contains a colon and a space.
+    # 2. Colons are reserved characters in some filesystems (Windows) and confusing in others (Linux).
+    # 3. Spaces require escaping in the shell (e.g. "query\ all_embeddings.pqt").
+    # 4. Replacing them with underscores ensures a clean, portable filename like "query_all_embeddings.pqt".
+    safe_prefix = prefix.replace(": ", "_").replace(":", "_").replace(" ", "_")
+    
+    filename = f"{safe_prefix}all_embeddings.pqt"
+    p = os.path.join(CACHE_ROOT, filename)
+    
+    print(f"Saving dataframe shape {df.shape} to {p}...", flush=True)
+    df.write_parquet(p)
+        
+    log_mem("after save")
+
+        
 
 def process_dataset_full(conversations_df, model):
     t0 = time.time()
